@@ -1,0 +1,104 @@
+name: Sync Umami image
+
+# 为什么存在：飞牛（FNOS）直连 ghcr.io 拉 umami 官方镜像会卡死 ——
+# 认证能过（返回 401 是 registry 的正常未认证应答），但镜像层所在的主机
+# pkg-containers.githubusercontent.com 拉不动，docker pull 会长时间停在 Waiting。
+# 飞牛上配置的 5 个加速源都是 Docker Hub 的 mirror（registry-mirrors），
+# 按 Docker 的设计只对 docker.io 生效，对 ghcr.io 无效。
+#
+# 这台 runner 在美国，访问 ghcr.io 很快，所以由它把官方镜像复制到我们自己的
+# 命名空间下，FNOS 从这里拉。同一条路已验证可用：ghcr.io/viciy2023/address、
+# ghcr.io/viciy2023/wb2panel-deploy 都是这么发的，现在都跑在飞牛上。
+#
+# 搬而不是建：Umami 官方已经发布镜像，自己编译是重复劳动，而且要跑完整的
+# Next.js 16 + Prisma 7 构建链，既慢又容易失败。docker buildx imagetools create
+# 在两个 registry 之间直接复制 manifest，不落盘、保留多架构，
+# 复制出来的 digest 与官方完全一致。
+
+on:
+  schedule:
+    # 每 6 小时一次；UTC 01/07/13/19 = 北京 09/15/21/03 点
+    - cron: '0 1,7,13,19 * * *'
+  workflow_dispatch:
+
+env:
+  UPSTREAM_IMAGE: ghcr.io/umami-software/umami
+  UPSTREAM_TAG: postgresql-latest
+  TARGET_IMAGE: ghcr.io/viciy2023/umami
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+      digest: ${{ steps.compare.outputs.digest }}
+    steps:
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 读取上游 digest 并与本地指纹比对
+        id: compare
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "${UPSTREAM_IMAGE}:${UPSTREAM_TAG}" --format '{{.Manifest.Digest}}')
+          LAST=$(cat last-sync.txt 2>/dev/null | tr -d '[:space:]' || echo "")
+          echo "upstream: ${DIGEST}"
+          echo "local   : ${LAST:-<空>}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          if [ "${DIGEST}" = "${LAST}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "上游未变化，跳过同步。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "检测到变化，准备同步。"
+          fi
+
+  sync:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 搬运镜像（registry 到 registry，保留多架构）
+        id: copy
+        run: |
+          STAMP=$(date -u +%Y%m%d)
+          docker buildx imagetools create \
+            --tag "${TARGET_IMAGE}:latest" \
+            --tag "${TARGET_IMAGE}:${STAMP}" \
+            "${UPSTREAM_IMAGE}:${UPSTREAM_TAG}"
+          echo "stamp=${STAMP}" >> "$GITHUB_OUTPUT"
+          echo "已同步 ${UPSTREAM_IMAGE}:${UPSTREAM_TAG} -> ${TARGET_IMAGE}:latest 与 :${STAMP}"
+
+      - name: 记录指纹
+        run: echo "${{ needs.check.outputs.digest }}" > last-sync.txt
+
+      - name: 提交指纹
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last-sync.txt
+          if git diff --staged --quiet; then
+            echo "无变化可提交。"
+          else
+            git commit -m "sync: 同步 umami 镜像 $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            git pull --rebase origin main
+            git push
+          fi
