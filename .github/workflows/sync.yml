@@ -5,10 +5,10 @@ name: Sync Umami image
 # pkg-containers.githubusercontent.com 拉不动，docker pull 会长时间停在 Waiting。
 #
 # 本质差别在加速源：飞牛配了 5 个 registry-mirrors，但它们都是 Docker Hub 的
-# mirror，按 Docker 的设计只对 docker.io 生效；ghcr.io 一个兜底的都没有。
-# 所以这里同时往两个地方推送，飞牛优先用后者：
-#   ghcr.io/viciy2023/umami                 —— 本仓库 GITHUB_TOKEN 直接可用
-#   docker.io/<DOCKERHUB_USERNAME>/umami    —— 走飞牛 mirror，最稳
+# mirror，按 Docker 的设计只对 docker.io 生效，ghcr.io 一个兜底的都没有。
+# 所以这里同时往两个地方推送，飞牛用后者：
+#   ghcr.io/viciy2023/umami      —— GHCR 保留，作为备用通道
+#   docker.io/ccy2026/viciy2023  —— 走飞牛 mirror，实际使用的那条
 #
 # 搬而不是建：Umami 官方已经发布镜像，自己编译是重复劳动，而且要跑完整的
 # Next.js 16 + Prisma 7 构建链，既慢又容易失败。docker buildx imagetools create
@@ -25,6 +25,8 @@ env:
   UPSTREAM_IMAGE: ghcr.io/umami-software/umami
   UPSTREAM_TAG: postgresql-latest
   TARGET_IMAGE: ghcr.io/viciy2023/umami
+  # 飞牛实际拉取的那一份。Docker Hub 上首次 push 会自动创建这个仓库。
+  DOCKERHUB_REPO: viciy2023
 
 jobs:
   check:
@@ -53,7 +55,7 @@ jobs:
             echo "上游未变化，跳过同步。"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "检测到变化，准备同步。"
+            echo "检测到变化，开始同步。"
           fi
 
   sync:
@@ -74,7 +76,7 @@ jobs:
         run: |
           if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ] && [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
-            echo "Docker Hub 凭据已配置，将同时推送。"
+            echo "Docker Hub 凭据已配置。"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             echo "未配置 Docker Hub 凭据，本次只推送 GHCR。"
@@ -98,7 +100,7 @@ jobs:
         id: stamp
         run: echo "value=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-      - name: 搬运到 GHCR
+      - name: 搬运到 GHCR（备用通道）
         run: |
           docker buildx imagetools create \
             --tag "${TARGET_IMAGE}:latest" \
@@ -106,14 +108,15 @@ jobs:
             "${UPSTREAM_IMAGE}:${UPSTREAM_TAG}"
           echo "GHCR 已同步：${TARGET_IMAGE}:latest"
 
-      - name: 搬运到 Docker Hub（走飞牛 mirror 那条路）
+      - name: 搬运到 Docker Hub（飞牛实际拉取的那条）
         if: steps.hub.outputs.enabled == 'true'
         run: |
+          DEST="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${DOCKERHUB_REPO}"
           docker buildx imagetools create \
-            --tag "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/umami:latest" \
-            --tag "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/umami:${{ steps.stamp.outputs.value }}" \
+            --tag "${DEST}:latest" \
+            --tag "${DEST}:${{ steps.stamp.outputs.value }}" \
             "${UPSTREAM_IMAGE}:${UPSTREAM_TAG}"
-          echo "Docker Hub 已同步：docker.io/${{ secrets.DOCKERHUB_USERNAME }}/umami:latest"
+          echo "Docker Hub 已同步：${DEST}:latest"
 
       - name: 记录指纹
         run: echo "${{ needs.check.outputs.digest }}" > last-sync.txt

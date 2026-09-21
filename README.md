@@ -1,14 +1,19 @@
 # umami-deploy
 
-把 [Umami](https://github.com/umami-software/umami) 的官方镜像搬到自己的 GHCR 命名空间，供飞牛（FNOS）拉取。
+把 [Umami](https://github.com/umami-software/umami) 的官方镜像同步到两个 registry，供飞牛（FNOS）拉取：
+
+| 目标 | 用途 |
+| --- | --- |
+| `ccy2026/viciy2023`（Docker Hub） | **飞牛实际拉取的那条** —— 走飞牛配的国内 mirror |
+| `ghcr.io/viciy2023/umami`（GHCR） | 备用通道 |
 
 ## 为什么需要它
 
-飞牛直连 `ghcr.io` 拉 umami 官方镜像会卡死：认证能通过（返回 401 是 registry 的正常未认证应答），但镜像层所在的主机 `pkg-containers.githubusercontent.com` 拉不动，`docker pull` 会长时间停在 `Waiting`，30 秒零进度。
+飞牛直连 `ghcr.io` 拉 umami 官方镜像会卡死：认证能通过（返回 401 是 registry 的正常未认证应答），但镜像层所在的主机 `pkg-containers.githubusercontent.com` 拉不动，`docker pull` 会长时间停在 `Waiting`。
 
-飞牛上配置的那 5 个加速源都是 **Docker Hub 的 mirror**（`registry-mirrors`），按 Docker 的设计只对 `docker.io` 生效，对 `ghcr.io` 无效 —— 所以 `postgres:16-alpine` 秒拉下来，`umami` 一动不动。
+飞牛上配的那 5 个加速源都是 **Docker Hub 的 mirror**（`registry-mirrors`），按 Docker 的设计只对 `docker.io` 生效，对 `ghcr.io` 无效 —— 所以 `postgres:16-alpine` 秒拉下来，`umami` 一动不动。
 
-这台 runner 在美国，访问 `ghcr.io` 很快，所以由它定时把官方镜像复制一份到 `ghcr.io/viciy2023/umami`，FNOS 从这里拉。同一条路已经验证可用：`ghcr.io/viciy2023/address`、`ghcr.io/viciy2023/wb2panel-deploy` 都是这么发的，现在都跑在飞牛上。
+这台 runner 在美国，访问两个 registry 都快，所以由它定时搬运。
 
 ## 搬而不是建
 
@@ -19,9 +24,18 @@ Umami 官方已经在 `ghcr.io/umami-software/umami` 发布镜像，自己编译
 ## 同步策略
 
 - 每 6 小时检查一次上游镜像的 manifest digest（UTC 01/07/13/19，即北京 09/15/21/03 点）。
-- 与 `last-sync.txt` 里的指纹比对，**只有变化才同步**，不会每 6 小时白跑一次。
-- 同步时打两个标签：`latest` 和一个日期标签 `YYYYMMDD`，留一个可以回滚的时间点。
+- 与 `last-sync.txt` 里的指纹比对，**只有变化才同步**，不会白跑。
+- 每次同步打两个标签：`latest` 和一个日期标签 `YYYYMMDD`，留一个可以回滚的时间点。
 - 上游用的是滚动标签 `postgresql-latest`（Umami v3 起不再发版本化 tag），所以 digest 比对是唯一可靠的变动检测方式。
+
+## 需要的仓库 Secrets
+
+| 名字 | 值 |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名（`ccy2026`） |
+| `DOCKERHUB_TOKEN` | Docker Hub Access Token，权限 Read & Write |
+
+没有配这两个时，workflow 只推 GHCR，不会失败。
 
 ## 在飞牛上使用
 
@@ -30,21 +44,15 @@ cd /vol1/1000/Docker/umami
 docker compose pull && docker compose up -d
 ```
 
-`docker-compose.yml` 里的镜像地址写成：
+`docker-compose.yml` 里的镜像地址：
 
 ```yaml
-image: ghcr.io/viciy2023/umami:latest
+image: ccy2026/viciy2023:latest
 ```
 
-数据库仍然用 `postgres:16-alpine`，它走 Docker Hub mirror，本来就拉得动。
+写成短名（不带 `docker.io/` 前缀）时 Docker 默认就是 Docker Hub，也就会走飞牛配的那几个加速源。数据库仍用 `postgres:16-alpine`。
 
-## 首次使用要确认包是公开的
-
-GHCR 的包可见性跟随仓库。本仓库是 public，推送后包通常也是 public；如果飞牛拉取报 `denied`，到仓库右侧 **Packages → umami → Package settings** 把可见性改成 public，或者在飞牛上执行一次：
-
-```bash
-echo <你的_GITHUB_TOKEN> | docker login ghcr.io -u Viciy2023 --password-stdin
-```
+升级和重装都只需要 `docker compose pull && docker compose up -d`：层缓存会保留，通常只拉变化的那几层。
 
 ## 手动触发
 
