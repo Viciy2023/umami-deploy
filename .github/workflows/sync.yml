@@ -3,12 +3,12 @@ name: Sync Umami image
 # 为什么存在：飞牛（FNOS）直连 ghcr.io 拉 umami 官方镜像会卡死 ——
 # 认证能过（返回 401 是 registry 的正常未认证应答），但镜像层所在的主机
 # pkg-containers.githubusercontent.com 拉不动，docker pull 会长时间停在 Waiting。
-# 飞牛上配置的 5 个加速源都是 Docker Hub 的 mirror（registry-mirrors），
-# 按 Docker 的设计只对 docker.io 生效，对 ghcr.io 无效。
 #
-# 这台 runner 在美国，访问 ghcr.io 很快，所以由它把官方镜像复制到我们自己的
-# 命名空间下，FNOS 从这里拉。同一条路已验证可用：ghcr.io/viciy2023/address、
-# ghcr.io/viciy2023/wb2panel-deploy 都是这么发的，现在都跑在飞牛上。
+# 本质差别在加速源：飞牛配了 5 个 registry-mirrors，但它们都是 Docker Hub 的
+# mirror，按 Docker 的设计只对 docker.io 生效；ghcr.io 一个兜底的都没有。
+# 所以这里同时往两个地方推送，飞牛优先用后者：
+#   ghcr.io/viciy2023/umami                 —— 本仓库 GITHUB_TOKEN 直接可用
+#   docker.io/<DOCKERHUB_USERNAME>/umami    —— 走飞牛 mirror，最稳
 #
 # 搬而不是建：Umami 官方已经发布镜像，自己编译是重复劳动，而且要跑完整的
 # Next.js 16 + Prisma 7 构建链，既慢又容易失败。docker buildx imagetools create
@@ -69,6 +69,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: 判断 Docker Hub 凭据是否已配置
+        id: hub
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ] && [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub 凭据已配置，将同时推送。"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "未配置 Docker Hub 凭据，本次只推送 GHCR。"
+          fi
+
       - name: 登录 GHCR
         uses: docker/login-action@v3
         with:
@@ -76,16 +87,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 搬运镜像（registry 到 registry，保留多架构）
-        id: copy
+      - name: 登录 Docker Hub
+        if: steps.hub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 取时间戳
+        id: stamp
+        run: echo "value=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: 搬运到 GHCR
         run: |
-          STAMP=$(date -u +%Y%m%d)
           docker buildx imagetools create \
             --tag "${TARGET_IMAGE}:latest" \
-            --tag "${TARGET_IMAGE}:${STAMP}" \
+            --tag "${TARGET_IMAGE}:${{ steps.stamp.outputs.value }}" \
             "${UPSTREAM_IMAGE}:${UPSTREAM_TAG}"
-          echo "stamp=${STAMP}" >> "$GITHUB_OUTPUT"
-          echo "已同步 ${UPSTREAM_IMAGE}:${UPSTREAM_TAG} -> ${TARGET_IMAGE}:latest 与 :${STAMP}"
+          echo "GHCR 已同步：${TARGET_IMAGE}:latest"
+
+      - name: 搬运到 Docker Hub（走飞牛 mirror 那条路）
+        if: steps.hub.outputs.enabled == 'true'
+        run: |
+          docker buildx imagetools create \
+            --tag "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/umami:latest" \
+            --tag "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/umami:${{ steps.stamp.outputs.value }}" \
+            "${UPSTREAM_IMAGE}:${UPSTREAM_TAG}"
+          echo "Docker Hub 已同步：docker.io/${{ secrets.DOCKERHUB_USERNAME }}/umami:latest"
 
       - name: 记录指纹
         run: echo "${{ needs.check.outputs.digest }}" > last-sync.txt
