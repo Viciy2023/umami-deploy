@@ -1,14 +1,17 @@
 name: Sync Umami image
 
 # 为什么存在：飞牛（FNOS）直连 ghcr.io 拉 umami 官方镜像会卡死 ——
-# 认证能过（返回 401 是 registry 的正常未认证应答），但镜像层所在的主机
-# pkg-containers.githubusercontent.com 拉不动，docker pull 会长时间停在 Waiting。
+# 镜像层所在的主机 pkg-containers.githubusercontent.com 拉不动，
+# docker pull 会长时间停在 Waiting。
 #
-# 本质差别在加速源：飞牛配了 5 个 registry-mirrors，但它们都是 Docker Hub 的
-# mirror，按 Docker 的设计只对 docker.io 生效，ghcr.io 一个兜底的都没有。
+# 本质差别在加速源：飞牛配的 registry-mirrors 都是 Docker Hub 的 mirror，
+# 按 Docker 的设计只对 docker.io 生效，ghcr.io 一个兜底的都没有。
 # 所以这里同时往两个地方推送，飞牛用后者：
-#   ghcr.io/viciy2023/umami      —— GHCR 保留，作为备用通道
-#   docker.io/ccy2026/viciy2023  —— 走飞牛 mirror，实际使用的那条
+#   ghcr.io/viciy2023/umami        —— GHCR 保留，作为备用通道
+#   ccy2026/umami                  —— 走飞牛 mirror，实际使用的那条
+#
+# 命名跟 Docker Hub 的惯例对齐：<用户名>/<镜像名>:<标签>。
+# 一个服务占用一个仓库，而不是把所有镜像塞进同一个仓库。
 #
 # 搬而不是建：Umami 官方已经发布镜像，自己编译是重复劳动，而且要跑完整的
 # Next.js 16 + Prisma 7 构建链，既慢又容易失败。docker buildx imagetools create
@@ -25,8 +28,8 @@ env:
   UPSTREAM_IMAGE: ghcr.io/umami-software/umami
   UPSTREAM_TAG: postgresql-latest
   TARGET_IMAGE: ghcr.io/viciy2023/umami
-  # 飞牛实际拉取的那一份。Docker Hub 上首次 push 会自动创建这个仓库。
-  DOCKERHUB_REPO: viciy2023
+  # Docker Hub 上的仓库名。完整镜像名是 <DOCKERHUB_USERNAME>/umami。
+  DOCKERHUB_REPO: umami
 
 jobs:
   check:
