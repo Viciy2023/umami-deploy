@@ -1,2 +1,0 @@
-   # 飞牛实际拉取的那一份。Docker Hub 上首次 push 会自动创建这个仓库。
-  DOCKERHUB_REPO: umami
